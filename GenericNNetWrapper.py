@@ -66,7 +66,8 @@ class GenericNNetWrapper(NeuralNet):
 
 				# predict
 				optimizer.zero_grad(set_to_none=True)
-				out_pi, out_v = self.nnet(boards, valid_actions)
+				out_pi, out_pw, out_v = self.nnet(boards, valid_actions)
+                                #TODO: compute pw loss
 				l_pi, l_v = self.loss_pi(target_pis, out_pi), self.loss_v(target_vs, target_qs, out_v)
 				total_loss = l_pi + l_v
 
@@ -104,8 +105,8 @@ class GenericNNetWrapper(NeuralNet):
 				'board': board.astype(np.float32).reshape((-1, self.nb_vect, self.vect_dim)),
 				'valid_actions': np.array(valid_actions).astype(np.bool_).reshape((-1, self.action_size)),
 			})
-			pi, v = np.exp(ort_outs[0][0]), ort_outs[1][0]
-			return pi, v
+			pi, pw, v = np.exp(ort_outs[0][0]), ort_outs[1][0], ort_outs[2][0]
+			return pi, pw, v
 
 		else:
 			board = torch.FloatTensor(board.astype(np.float32)).reshape((-1, self.nb_vect, self.vect_dim))
@@ -114,9 +115,9 @@ class GenericNNetWrapper(NeuralNet):
 				board, valid_actions = board.contiguous().cuda(), valid_actions.contiguous().cuda()
 			self.nnet.eval()
 			with torch.no_grad():
-				pi, v = self.nnet(board, valid_actions)
-			pi, v = torch.exp(pi).data.cpu().numpy()[0], v.data.cpu().numpy()[0]
-			return pi, v
+				pi, pw, v = self.nnet(board, valid_actions)
+			pi, pw, v = torch.exp(pi).data.cpu().numpy()[0], pw.data.cpu().numpy()[0], v.data.cpu().numpy()[0]
+			return pi, pw, v
 
 	def predict_client(self, board, valid_actions, batch_info):
 		if self.current_mode != 'onnx':
@@ -134,9 +135,9 @@ class GenericNNetWrapper(NeuralNet):
 
 		# Retrieve results in shared memory
 		ort_outs = shared_memory[i_result]
-		pi, v = np.exp(ort_outs[0]), ort_outs[1]
+		pi, pw, v = np.exp(ort_outs[0]), ort_outs[1], ort_outs[2]
 
-		return pi, v
+		return pi, pw, v
 
 	def predict_server(self, nb_threads, shared_memory, locks):
 		self.switch_target('inference')
@@ -151,7 +152,7 @@ class GenericNNetWrapper(NeuralNet):
 				'valid_actions': np.concatenate([x[1] for x in shared_memory[:nb_threads]]),
 			})
 			for i in range(nb_threads):
-				shared_memory[i+nb_threads] = (ort_outs[0][i], ort_outs[1][i])
+				shared_memory[i+nb_threads] = (ort_outs[0][i], ort_outs[1][i], ort_outs[2][i])
 
 			locks[0].release() # Unblock 1st thread
 
@@ -171,7 +172,8 @@ class GenericNNetWrapper(NeuralNet):
 			target_qs = torch.FloatTensor(np.array(qs).astype(np.float32))
 
 			# compute output
-			out_pi, out_v = self.nnet(boards, valid_actions)
+			out_pi, out_pw, out_v = self.nnet(boards, valid_actions)
+                        #TODO: add loss on pw
 			total_loss = self.loss_pi(target_pis, out_pi) + self.loss_v(target_vs, target_qs, out_v)
 			return total_loss.item()
 

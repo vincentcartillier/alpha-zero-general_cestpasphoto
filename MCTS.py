@@ -2,6 +2,7 @@ import logging
 import math
 import numpy as np
 import gc
+import itertools
 from random import randrange
 from copy import deepcopy
 
@@ -36,9 +37,13 @@ class MCTS():
         #       Nsa stores #times edge s,a was visited
         #       r stores round number
         #       Qs stores Q value for s
+        #       PWs stores initial policy for White tile RNG variable (returned by neural net)    
         self.nodes_data = {} # stores data for each nodes in a single dictionary
-        self.Qsa_default = np.full (self.game.getActionSize(), NAN, dtype=np.float64)
-        self.Nsa_default = np.zeros(self.game.getActionSize()     , dtype=np.int64)
+        #self.Qsa_default =  np.full(self.game.getActionSize()*2, NAN, dtype=np.float64)
+        #self.Nsa_default = np.zeros(self.game.getActionSize()*2     , dtype=np.int64)
+        
+        self.Qsa_default = {a:np.float64(NAN) for a in itertools.product(range(self.game.getActionSize()),range(2))}
+        self.Nsa_default = {a:np.int64(0) for a in itertools.product(range(self.game.getActionSize()),range(2))}
 
         self.rng = np.random.default_rng()
         self.step = 0
@@ -65,7 +70,8 @@ class MCTS():
             self.search(canonicalBoard, dirichlet_noise=dir_noise, forced_playouts=forced_playouts)
 
         s = self.game.stringRepresentation(canonicalBoard)
-        counts = [self.nodes_data[s][5][a] for a in range(self.game.getActionSize())] # Nsa
+        #counts = [self.nodes_data[s][5][a] for a in range(self.game.getActionSize())] # Nsa
+        counts = [self.nodes_data[s][5][a] for a in itertools.product(range(self.game.getActionSize()),range(2))] # Nsa
 
         # Compute Q at root node
         q_player0 = self.nodes_data[s][7]
@@ -74,11 +80,15 @@ class MCTS():
         # Policy target pruning
         if forced_playouts:
             best_count = max(counts)
-            Psas   = [self.nodes_data[s][2][a] for a in range(self.game.getActionSize())] # Ps[a]
+            #TODO:
+            #Psas   = [self.nodes_data[s][2][a] for a in range(self.game.getActionSize())] # Ps[a]
+            Psas   = [self.nodes_data[s][2][a] for a in itertools.product(range(self.game.getActionSize()),range(2))] # Ps[a]
             adjusted_counts = [Nsa-int(math.sqrt(k*Psa*nb_MCTS_sims)) if Nsa != best_count else Nsa for (Nsa, Psa) in zip(counts, Psas)]
             adjusted_counts = [c if c > 1 else 0 for c in adjusted_counts]
             counts = adjusted_counts
-
+        
+        #TODO: this should be the prob over action square only
+        #TODO: compute prob_w
         probs = np.array(counts)
         probs = probs / probs.sum()
 
@@ -91,12 +101,18 @@ class MCTS():
                 self.last_cleaning = r
 
         if temp == 0:
+            all_actions=list(itertools.product(range(self.game.getActionSize()),range(2)))
             bestAs = np.array(np.argwhere(counts == np.max(counts))).flatten()
-            bestA = np.random.choice(bestAs)
-            probs = [0] * len(counts)
-            probs[bestA] = 1
-            return probs, q, is_full_search
-
+            bestA_index = np.random.choice(bestAs)
+            best_A = all_actions[bestA_index] 
+            best_a, best_w = best_A
+            #probs = [0] * len(counts)
+            probs = [0] * self.game.getActionSize()
+            probs[best_a] = 1
+            probs_w = best_w
+            return probs, probs_w, q, is_full_search
+        
+        #TODO: compute separate probs for a and w
         counts = [x ** (1. / temp) for x in counts]
         counts_sum = float(sum(counts))
         probs = [x / counts_sum for x in counts]
@@ -123,7 +139,7 @@ class MCTS():
         """
 
         s = self.game.stringRepresentation(canonicalBoard)
-        Es, Vs, Ps, Ns, Qsa, Nsa, r, Qs = self.nodes_data.get(s, (None, )*8)
+        Es, Vs, Ps, Ns, Qsa, Nsa, r, Qs, PWs = self.nodes_data.get(s, (None, )*9)
         if r is None:
             r = self.game.getRound(canonicalBoard)
 
@@ -131,7 +147,7 @@ class MCTS():
             Es = self.game.getGameEnded(canonicalBoard, 0)
             if Es.any():
                 # terminal node
-                self.nodes_data[s] = (Es, Vs, Ps, Ns, Qsa, Nsa, r, Qs)
+                self.nodes_data[s] = (Es, Vs, Ps, Ns, Qsa, Nsa, r, Qs, PWs)
                 return Es
         elif Es.any():
             # terminal node
@@ -141,28 +157,28 @@ class MCTS():
             # First time that we explore state s
             Vs = self.game.getValidMoves(canonicalBoard, 0)
             if self.batch_info is None:
-                Ps, v = self.nnet.predict(canonicalBoard, Vs)
+                Ps, PWs, v = self.nnet.predict(canonicalBoard, Vs)
             else:
-                Ps, v = self.nnet.predict_client(canonicalBoard, Vs, self.batch_info)
+                Ps, PWs, v = self.nnet.predict_client(canonicalBoard, Vs, self.batch_info)
             if dirichlet_noise:
                 Ps = softmax(Ps, self.args.temperature[0])
-                self.applyDirNoise(Ps, Vs)
+                self.applyDirNoise(Ps, Vs[:-1])
             normalise(Ps)
 
             Ns, Qsa, Nsa = 0, self.Qsa_default.copy(), self.Nsa_default.copy()
-            self.nodes_data[s] = (Es, Vs, Ps, Ns, Qsa, Nsa, r, v[0])
+            self.nodes_data[s] = (Es, Vs, Ps, Ns, Qsa, Nsa, r, v[0], PWs)
             return v
 
         if dirichlet_noise:
             # We already visited this node, adding dirichlet noise this time
             Ps = softmax(Ps, self.args.temperature[0])
-            self.applyDirNoise(Ps, Vs)
+            self.applyDirNoise(Ps, Vs[:-1])
             normalise(Ps)
 
         # pick the action with the highest upper confidence bound
         # get next state and get canonical version of it
         a, next_s, next_player = get_next_best_action_and_canonical_state(
-            Es, Vs, Ps, Ns, Qsa, Nsa, Qs,
+            Es, Vs, Ps, Ns, Qsa, Nsa, Qs, PWs,
             self.args.cpuct,
             self.game.board,
             canonicalBoard,
@@ -180,7 +196,7 @@ class MCTS():
         Nsa[a] += 1
         Ns += 1
 
-        self.nodes_data[s] = (Es, Vs, Ps, Ns, Qsa, Nsa, r, Qs)
+        self.nodes_data[s] = (Es, Vs, Ps, Ns, Qsa, Nsa, r, Qs, PWs)
         return v
 
 
@@ -208,16 +224,21 @@ def np_roll(arr, n):
 
 # pick the action with the highest upper confidence bound
 @njit(cache=True, fastmath=True, nogil=True)
-def pick_highest_UCB(Es, Vs, Ps, Ns, Qsa, Nsa, Qs, cpuct, forced_playouts, n_iter, fpu):
+def pick_highest_UCB(Es, Vs, Ps, Ns, Qsa, Nsa, Qs, PWs, cpuct, forced_playouts, n_iter, fpu):
+    #TODO: probably have to do the MCTS over the w variable as well..
     cur_best = MINFLOAT
     best_act = -1
     fpu_init = Qs-fpu if fpu > 0 else fpu
 
-    for a, valid in enumerate(Vs):
+    w = (PWs > 0.5) * float(Vs[-1])
+    w = int(w)
+    
+    #TODO: loop over the w in [0,1]
+    for a, valid in enumerate(Vs[:-1]):
         if valid:
             if forced_playouts:
                 if Nsa[a] < int(math.sqrt(k * Ps[a] * n_iter)): # Nsa is zero when not set
-                    return a
+                    return (a,w)
 
             if Qsa[a] != NAN:
                 u = Qsa[a] + cpuct * Ps[a] * math.sqrt(Ns) / (1 + Nsa[a])
@@ -227,12 +248,12 @@ def pick_highest_UCB(Es, Vs, Ps, Ns, Qsa, Nsa, Qs, cpuct, forced_playouts, n_ite
             if u > cur_best:
                 cur_best, best_act = u, a
 
-    return best_act
+    return (best_act,w)
 
 
 @njit(fastmath=True, nogil=True) # no cache because it relies on jitclass which isn't compatible with cache
-def get_next_best_action_and_canonical_state(Es, Vs, Ps, Ns, Qsa, Nsa, Qs, cpuct, gameboard, canonicalBoard, forced_playouts, n_iter, fpu, random_seed):
-    a = pick_highest_UCB(Es, Vs, Ps, Ns, Qsa, Nsa, Qs, cpuct, forced_playouts, n_iter, fpu)
+def get_next_best_action_and_canonical_state(Es, Vs, Ps, Ns, Qsa, Nsa, Qs, PWs, cpuct, gameboard, canonicalBoard, forced_playouts, n_iter, fpu, random_seed):
+    a = pick_highest_UCB(Es, Vs, Ps, Ns, Qsa, Nsa, Qs, PWs, cpuct, forced_playouts, n_iter, fpu)
 
     # Do action 'a'
     gameboard.copy_state(canonicalBoard, True)
